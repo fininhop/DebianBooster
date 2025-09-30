@@ -53,6 +53,10 @@ Interface pour visualiser, contrôler et gérer les services système :
 ## Installation
 
 1. Installer les dépendances :
-
-```bash
 sudo apt install python3 python3-pyqt5 cpupower systemctl
+
+2. Telecharger :
+Télécharger le script DebianKDEBooster.py.
+
+3. Executer :
+sudo python3 DebianBooster.py
