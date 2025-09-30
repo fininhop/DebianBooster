@@ -1,0 +1,18 @@
+[Desktop Entry]
+Categories=Utility;System;
+Comment[fr_FR]=Gestionnaire de performance et nettoyage pour Debian KDE
+Comment=Gestionnaire de performance et nettoyage pour Debian KDE
+Exec=/usr/local/bin/DebianBooster.sh
+GenericName[fr_FR]=
+GenericName=
+Icon=/home/cattac/.local/share/icons/DebianBoosterIcon.png
+MimeType=
+Name[fr_FR]=Debian KDE Booster
+Name=Debian KDE Booster
+Path=
+StartupNotify=true
+Terminal=false
+TerminalOptions=
+Type=Application
+X-KDE-SubstituteUID=false
+X-KDE-Username=
