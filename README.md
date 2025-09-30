@@ -81,5 +81,9 @@ sudo chmod +x /usr/local/bin/DebianBooster.sh
 
 ### 5. Lancer l’application
 Vous pouvez maintenant lancer l’application depuis le menu KDE ou directement via le terminal :
-Si depuis le terminal utiliser: sudo python3 DebianBooster.py
+
+Si depuis le terminal utiliser: 
+
+sudo python3 DebianBooster.py
+
 Sinon si vous avez fais les étapes de 1 à 4 vous pouvez trouver l'application depuis le le menu KDE.
