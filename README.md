@@ -50,13 +50,36 @@ Interface pour visualiser, contrôler et gérer les services système :
 
 ---
 
-## Installation
+## Pre-Installation
 
 1. Installer les dépendances :
+
 sudo apt install python3 python3-pyqt5 cpupower systemctl
 
-2. Telecharger :
-Télécharger le script DebianKDEBooster.py.
+## Installation
 
-3. Executer :
-sudo python3 DebianBooster.py
+Pour installer Debian KDE Booster sur votre système Debian/KDE, suivez ces étapes :
+
+### 1. Copier les fichiers exécutables
+
+Placez les fichiers `DebianBooster.py` et `DebianBooster.sh` dans `/usr/local/bin/` :
+
+sudo cp DebianBooster.py DebianBooster.sh /usr/local/bin/
+
+### 2. Copier le fichier desktop
+
+cp DebianBooster.desktop ~/.local/share/applications/
+
+### 3. Copier l’icône
+
+cp DebianBooster.png ~/.local/share/icons/
+
+### 4. Donner les permissions d’exécution
+
+sudo chmod +x /usr/local/bin/DebianBooster.py
+sudo chmod +x /usr/local/bin/DebianBooster.sh
+
+### 5. Lancer l’application
+Vous pouvez maintenant lancer l’application depuis le menu KDE ou directement via le terminal :
+Si depuis le terminal utiliser: sudo python3 DebianBooster.py
+Sinon si vous avez fais les étapes de 1 à 4 vous pouvez trouver l'application depuis le le menu KDE.
