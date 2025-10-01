@@ -168,15 +168,22 @@ class MainWindow(QtWidgets.QMainWindow):
         self.resize(1000,800)
         self.pool = QtCore.QThreadPool(); self.pool.setMaxThreadCount(2)
         self.tabs = QtWidgets.QTabWidget(); self.setCentralWidget(self.tabs)
-        self.setup_clean_tab(); self.setup_perf_tab(); self.setup_services_tab(); self.setup_inactive_services_tab()
+
+        # ---- setup onglets ----
+        self.setup_clean_tab()
+        self.setup_perf_tab()
+        self.setup_services_tab()
+        self.setup_inactive_services_tab()
         self.refresh_perf()
+
+        # Timer services
         self.services_timer = QtCore.QTimer(); self.services_timer.setInterval(5000)
         self.services_timer.timeout.connect(self.refresh_active_service_tab)
         self.tabs.currentChanged.connect(self.on_tab_changed)
 
-    # ---- LOG UTILS ----
+    # ---------------- LOG UTILS ----------------
     def log_safe(self, widget, msg):
-        clean_msg = msg.strip().replace("\n", " ")
+        clean_msg = msg.strip()
         if clean_msg:
             QtCore.QTimer.singleShot(0, lambda: widget.appendPlainText(clean_msg))
 
@@ -197,10 +204,40 @@ class MainWindow(QtWidgets.QMainWindow):
             self.log_perf.appendPlainText("\n" + "-"*40 + "\n")
         self.start_with_loader(self.refresh_perf, log_widget=self.log_perf)
         
-    def apply_perf_with_log(self, apply, selected):
-        if self.log_perf.toPlainText().strip():
-            self.log_perf.appendPlainText("\n" + "-"*40 + "\n")
-        self.start_with_loader(self.apply_perf, apply, selected, log_widget=self.log_perf)
+    def apply_perf(self, apply, selected):
+        results = []
+        keys = self.options.keys() if not selected else [k for k,(cb,_) in self.options.items() if cb.isChecked()]
+        if not keys:
+            results.append(("info","Aucune option sélectionnée"))
+            return results
+
+        results.append(("info", f"{'Application' if apply else 'Restauration'} : {', '.join(keys)}"))
+
+        for k in keys:
+            try:
+                if k == "governor":
+                    # appliquer/restaurer dans le thread principal
+                    gov_value = "performance" if apply else "powersave"
+                    QtCore.QTimer.singleShot(0, lambda val=gov_value: set_cpu_governor(val))
+
+                # Autres options (swappiness, hugepages, zram, iosched, services…) restent inchangées
+                results.append((k, f"{k} -> {'appliqué' if apply else 'restauré'}"))
+            except Exception as e:
+                results.append((k, f"{k} erreur : {e}"))
+
+        # Vérifier que le governor a bien changé avant de rafraîchir l'UI
+        def refresh_after_governor():
+            max_tries = 5
+            interval = 0.2
+            for _ in range(max_tries):
+                if "governor" in keys and get_cpu_governor() != ("performance" if apply else "powersave"):
+                    time.sleep(interval)
+                else:
+                    break
+            self.refresh_perf()  # refresh de l’UI dans le thread principal
+
+        QtCore.QTimer.singleShot(100, refresh_after_governor)  # petit délai avant vérif
+        return results
         
     # ---- Nettoyage ----
     def setup_clean_tab(self):
@@ -228,6 +265,7 @@ class MainWindow(QtWidgets.QMainWindow):
         btn_layout = QtWidgets.QHBoxLayout(); self.btn_clean_sel = QtWidgets.QPushButton("Appliquer sélection"); self.btn_clean_all = QtWidgets.QPushButton("Appliquer tout"); btn_layout.addWidget(self.btn_clean_sel); btn_layout.addWidget(self.btn_clean_all); layout.addLayout(btn_layout,n_rows,0,1,2)
         self.log_clean = QtWidgets.QPlainTextEdit(); self.log_clean.setReadOnly(True); layout.addWidget(self.log_clean,n_rows+1,0,1,2)
         self.tab_clean.setLayout(layout)
+        # Boutons et log
         self.btn_clean_sel.clicked.connect(lambda: self.confirmed_start_clean(True))
         self.btn_clean_all.clicked.connect(lambda: self.confirmed_start_clean(False))
 
@@ -240,8 +278,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if not keys:
             self.log_clean.appendPlainText("Aucune action sélectionnée")
             return
-        if self.log_clean.toPlainText().strip():
-            self.log_clean.appendPlainText("-"*40)
+        # Ne plus ajouter de séparateur ici
         self.start_with_loader(clean_caches, keys, log_widget=self.log_clean)
 
 
@@ -250,21 +287,41 @@ class MainWindow(QtWidgets.QMainWindow):
         for a, msg in results: self.log_clean.appendPlainText(msg)
         self.log_clean.appendPlainText("[✓] Nettoyage terminé\n")
 
-    # ---- Performance ----
+    # ---------------- Onglet Performance ----------------
     def setup_perf_tab(self):
-        self.options = {}; self.tab_perf = QtWidgets.QWidget(); self.tabs.addTab(self.tab_perf,"Performance")
-        opts = [("swappiness","vm.swappiness"),("hugepages","vm.nr_hugepages"),("governor","Gouverneur CPU"),("zram","ZRAM"),("iosched","Planificateur I/O"),("bluetooth","Service Bluetooth"),("cups","Service CUPS")]
-        layout = QtWidgets.QVBoxLayout(); opts_group = QtWidgets.QGroupBox("Options"); opts_layout = QtWidgets.QGridLayout(); opts_group.setLayout(opts_layout)
+        self.options = {}
+        self.tab_perf = QtWidgets.QWidget()
+        self.tabs.addTab(self.tab_perf, "Performance")
+        opts = [("swappiness","vm.swappiness"),("hugepages","vm.nr_hugepages"),
+                ("governor","Gouverneur CPU"),("zram","ZRAM"),
+                ("iosched","Planificateur I/O"),("bluetooth","Service Bluetooth"),
+                ("cups","Service CUPS")]
+        layout = QtWidgets.QVBoxLayout()
+        opts_group = QtWidgets.QGroupBox("Options")
+        opts_layout = QtWidgets.QGridLayout()
+        opts_group.setLayout(opts_layout)
         for i,(k,lbl) in enumerate(opts):
             cb = QtWidgets.QCheckBox(lbl); val = QtWidgets.QLabel("...")
             opts_layout.addWidget(cb,i,0); opts_layout.addWidget(val,i,1)
             self.options[k] = (cb,val)
         layout.addWidget(opts_group)
-        btn_layout = QtWidgets.QHBoxLayout(); self.btn_refresh = QtWidgets.QPushButton("Rafraîchir"); self.btn_apply_sel = QtWidgets.QPushButton("Appliquer sélection"); self.btn_revert_sel = QtWidgets.QPushButton("Revert sélection"); self.btn_apply_all = QtWidgets.QPushButton("Appliquer tout"); self.btn_revert_all = QtWidgets.QPushButton("Revert tout")
+
+        # boutons
+        btn_layout = QtWidgets.QHBoxLayout()
+        self.btn_refresh = QtWidgets.QPushButton("Rafraîchir")
+        self.btn_apply_sel = QtWidgets.QPushButton("Appliquer sélection")
+        self.btn_revert_sel = QtWidgets.QPushButton("Revert sélection")
+        self.btn_apply_all = QtWidgets.QPushButton("Appliquer tout")
+        self.btn_revert_all = QtWidgets.QPushButton("Revert tout")
         for b in [self.btn_refresh,self.btn_apply_sel,self.btn_revert_sel,self.btn_apply_all,self.btn_revert_all]: btn_layout.addWidget(b)
         layout.addLayout(btn_layout)
-        self.log_perf = QtWidgets.QPlainTextEdit(); self.log_perf.setReadOnly(True); layout.addWidget(self.log_perf)
+
+        # log
+        self.log_perf = QtWidgets.QPlainTextEdit(); self.log_perf.setReadOnly(True)
+        layout.addWidget(self.log_perf)
         self.tab_perf.setLayout(layout)
+
+        # connections
         self.btn_refresh.clicked.connect(lambda: self.confirmed_refresh_perf())
         self.btn_apply_sel.clicked.connect(lambda: self.confirmed_apply_perf(True, True))
         self.btn_revert_sel.clicked.connect(lambda: self.confirmed_apply_perf(False, True))
@@ -273,49 +330,72 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def confirmed_refresh_perf(self):
         if confirm_action(self,"Confirmer le rafraîchissement ?"):
-            self.start_with_loader(self.refresh_perf, log_widget=self.log_perf)
+            self.refresh_perf()
 
     def confirmed_apply_perf(self, apply, selected):
         if confirm_action(self, f"Confirmer {'application' if apply else 'restauration'} ?"):
-            self.start_with_loader(self.apply_perf, apply, selected, log_widget=self.log_perf)
+            self.apply_perf(apply, selected)
 
-
-    def log_perf_msg(self,msg): self.log_safe(self.log_perf, msg)
-
+    # ------------------ refresh_perf thread-safe ------------------
     def refresh_perf(self):
-        def fn():
-            msgs = []
+        def worker_fn():
             try:
-                self.options["swappiness"][1].setText(get_sysctl_param("vm.swappiness"))
-                self.options["hugepages"][1].setText(get_sysctl_param("vm.nr_hugepages"))
-                self.options["governor"][1].setText(get_cpu_governor())
-                self.options["zram"][1].setText("activé" if zram_enabled() else "désactivé")
-                ios = get_io_schedulers(); self.options["iosched"][1].setText(",".join(f"{k}:{v}" for k,v in ios.items()))
-                self.options["bluetooth"][1].setText("activé" if service_enabled("bluetooth") else "désactivé")
-                self.options["cups"][1].setText("activé" if service_enabled("cups") else "désactivé")
-                msgs.append("[✓] Statut rafraîchi")
+                return {
+                    "swappiness": get_sysctl_param("vm.swappiness"),
+                    "hugepages": get_sysctl_param("vm.nr_hugepages"),
+                    "governor": get_cpu_governor(),
+                    "zram": "activé" if zram_enabled() else "désactivé",
+                    "iosched": ",".join(f"{k}:{v}" for k,v in get_io_schedulers().items()),
+                    "bluetooth": "activé" if service_enabled("bluetooth") else "désactivé",
+                    "cups": "activé" if service_enabled("cups") else "désactivé"
+                }
             except Exception as e:
-                msgs.append(f"[Erreur] {e}")
-            return [("info", m) for m in msgs]
-        self.start_with_loader(fn, log_widget=self.log_perf)
-        
+                return {"error": str(e)}
+
+        def update_ui(res):
+            if "error" in res:
+                self.log_safe(self.log_perf, f"[Erreur] {res['error']}")
+                return
+            for k, v in res.items():
+                if k in self.options:
+                    self.options[k][1].setText(v)
+            self.log_safe(self.log_perf, "-"*40)
+            self.log_safe(self.log_perf, "[✓] Statut rafraîchi")
+
+        worker = Worker(worker_fn)
+        worker.signals.result.connect(update_ui)
+        self.pool.start(worker)
+
+    # ------------------ apply_perf thread-safe ------------------
     def apply_perf(self, apply, selected):
-        results = []
-        if self.log_perf.toPlainText().strip():
-            results.append(("info", "-"*40))
-        # le reste de ton code original qui ajoute chaque message
         keys = self.options.keys() if not selected else [k for k,(cb,_) in self.options.items() if cb.isChecked()]
         if not keys:
-            results.append(("info", "Aucune option sélectionnée"))
-            return results
-        results.append(("info", f"{'Application' if apply else 'Restauration'} : {', '.join(keys)}"))
+            self.log_safe(self.log_perf, "Aucune option sélectionnée")
+            return
+
+        self.log_safe(self.log_perf, "-"*40)
+        self.log_safe(self.log_perf, f"{'Application' if apply else 'Restauration'} : {', '.join(keys)}")
+
         for k in keys:
             try:
-                # ... applis/restauration comme avant
-                results.append((k, f"{k} -> {'appliqué' if apply else 'restauré'}"))
+                if k == "governor":
+                    set_cpu_governor("performance" if apply else "powersave")
+                elif k == "swappiness":
+                    set_sysctl_param("vm.swappiness","10" if apply else "60")
+                elif k == "hugepages":
+                    set_sysctl_param("vm.nr_hugepages","128" if apply else "0")
+                elif k == "zram":
+                    enable_zram() if apply else disable_zram()
+                elif k == "bluetooth":
+                    set_service("bluetooth", enable=not apply)
+                elif k == "cups":
+                    set_service("cups", enable=not apply)
+                self.log_safe(self.log_perf, f"{k} -> {'appliqué' if apply else 'restauré'}")
             except Exception as e:
-                results.append((k, f"{k} erreur : {e}"))
-        return results
+                self.log_safe(self.log_perf, f"{k} erreur : {e}")
+
+        # refresh UI après application
+        QtCore.QTimer.singleShot(200, self.refresh_perf)
 
     def setup_services_tab(self):
         self.tab_services = QtWidgets.QWidget()
@@ -518,16 +598,35 @@ class MainWindow(QtWidgets.QMainWindow):
         dlg = QtWidgets.QProgressDialog("Opération en cours...", None, 0, 0, self)
         dlg.setWindowModality(QtCore.Qt.ApplicationModal)
         dlg.setCancelButton(None)
-        dlg.show()
-        dlg.setWindowModality(QtCore.Qt.ApplicationModal)
-        dlg.setCancelButton(None)
         dlg.setMinimumDuration(0)
         dlg.show()
         worker = Worker(fn, *args)
+
         if log_widget:
-            worker.signals.result.connect(lambda res: [self.log_safe(log_widget, m) for _, m in res])
+            def handle_result(res):
+                if res is None:
+                    return
+                if isinstance(res, dict):
+                    if "error" in res:
+                        self.log_safe(log_widget, f"[Erreur] {res['error']}")
+                    else:
+                        self.log_safe(log_widget, "-"*40)
+                        self.log_safe(log_widget, "[✓] Statut rafraîchi")
+                else:
+                    self.log_safe(log_widget, "-"*40)  # séparateur avant chaque série
+                    for item in res:
+                        if item is None: continue
+                        try:
+                            _, msg = item
+                            self.log_safe(log_widget, msg)
+                        except Exception:
+                            pass
+
+            worker.signals.result.connect(handle_result)
+
         worker.signals.finished.connect(dlg.close)
         self.pool.start(worker)
+
 
 def main():
     app = QtWidgets.QApplication(sys.argv)
