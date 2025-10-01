@@ -78,23 +78,69 @@ def safe_rmtree(path):
 
 def clean_caches(actions):
     results = []
+
+    def clean_tmp_ultrasafe():
+        cutoff_recent = time.time() - 3600  # 1 heure
+        count = 0
+        current_user = os.getlogin()
+        tmp_dir = Path("/tmp")
+        if not tmp_dir.exists():
+            return 0
+        for p in tmp_dir.iterdir():
+            try:
+                # On ne touche que les fichiers appartenant à l'utilisateur courant
+                if hasattr(p, 'owner') and p.owner() != current_user:
+                    continue
+                # Ignorer fichiers récents
+                if p.stat().st_mtime > cutoff_recent:
+                    continue
+                if p.is_file():
+                    p.unlink()
+                    count += 1
+                elif p.is_dir():
+                    count += safe_rmtree(p)
+            except Exception:
+                continue
+        return count
+
+    def clean_var_tmp_safe(aggressive=False):
+        cutoff = time.time() - 30*86400  # 30 jours
+        count = 0
+        var_tmp = Path("/var/tmp")
+        if not var_tmp.exists():
+            return 0  # Rien à supprimer si le dossier n'existe pas
+        for p in var_tmp.iterdir():
+            try:
+                if p.is_file() and (aggressive or p.stat().st_mtime < cutoff):
+                    p.unlink()
+                    count += 1
+                elif p.is_dir():
+                    count += safe_rmtree(p)
+            except Exception:
+                continue
+        return count
+
     for a in actions:
         try:
             if a == "drop_caches":
                 run(["sync"], True)
                 run(["sh", "-c", "echo 3 > /proc/sys/vm/drop_caches"], True)
                 results.append((a, "[✓] Caches mémoire libérées"))
+
             elif a == "swap":
                 run(["swapoff", "-a"], True)
                 run(["swapon", "-a"], True)
                 results.append((a, "[✓] Swap rafraîchi"))
+
             elif a == "apt_autoremove":
                 run(["apt-get", "-y", "autoremove"], True)
                 run(["apt-get", "-y", "autoclean"], True)
                 results.append((a, "[✓] APT autoremove/autoclean effectués"))
+
             elif a == "journal_vacuum":
                 run(["journalctl", "--vacuum-time=30d"], True)
                 results.append((a, "[✓] Journaux systemd réduits à 30 jours"))
+
             elif a == "kde_logs":
                 count = 0
                 kde_paths = [HOME / ".xsession-errors", HOME / ".local/share/sddm"]
@@ -105,32 +151,19 @@ def clean_caches(actions):
                         else:
                             count += safe_rmtree(p)
                 results.append((a, f"[✓] {count} fichiers journaux KDE supprimés"))
+
             elif a == "tmp":
-                count = 0
-                for p in DIR_MAP.get("tmp", []):
-                    if p.exists():
-                        if p.is_file():
-                            p.unlink(); count += 1
-                        else:
-                            count += safe_rmtree(p)
-                results.append((a, f"[✓] {count} fichiers/dossiers supprimés dans /tmp"))
+                count = clean_tmp_ultrasafe()
+                results.append((a, f"[✓] {count} fichiers/dossiers supprimés dans /tmp (ultra-safe)"))
+
             elif a == "var_tmp":
-                cutoff = time.time() - 30*86400
-                count = 0
-                for p in Path("/var/tmp").iterdir():
-                    if p.is_file() and p.stat().st_mtime < cutoff:
-                        p.unlink(); count += 1
-                    elif p.is_dir() and safe_rmtree(p):
-                        count += 1
+                count = clean_var_tmp_safe(aggressive=False)
                 results.append((a, f"[✓] {count} fichiers/dossiers anciens supprimés dans /var/tmp"))
+
             elif a == "var_tmp_aggressive":
-                count = 0
-                for p in Path("/var/tmp").iterdir():
-                    if p.is_file():
-                        p.unlink(); count += 1
-                    elif p.is_dir() and safe_rmtree(p):
-                        count += 1
+                count = clean_var_tmp_safe(aggressive=True)
                 results.append((a, f"[✓] purge agressive : {count} fichiers/dossiers supprimés dans /var/tmp"))
+
             else:
                 count = 0
                 for p in DIR_MAP.get(a, []):
@@ -140,8 +173,10 @@ def clean_caches(actions):
                         else:
                             count += safe_rmtree(p)
                 results.append((a, f"[✓] {count} éléments supprimés ({a})"))
+
         except Exception as e:
             results.append((a, f"[Erreur] {e}"))
+
     return results
 
 class Signals(QtCore.QObject):
@@ -278,8 +313,26 @@ class MainWindow(QtWidgets.QMainWindow):
         if not keys:
             self.log_clean.appendPlainText("Aucune action sélectionnée")
             return
-        # Ne plus ajouter de séparateur ici
-        self.start_with_loader(clean_caches, keys, log_widget=self.log_clean)
+
+        def worker_fn():
+            return clean_caches(keys)
+
+        def update_log(results):
+            # Ajouter un séparateur uniquement si le log contient déjà du texte
+            if self.log_clean.toPlainText().strip():
+                self.log_clean.appendPlainText("-"*40)
+            for _, msg in results:
+                self.log_clean.appendPlainText(msg)
+
+        loader = QtWidgets.QProgressDialog("Nettoyage en cours...", None, 0, 0, self)
+        loader.setWindowModality(QtCore.Qt.ApplicationModal)
+        loader.setCancelButton(None)
+        loader.show()
+
+        worker = Worker(worker_fn)
+        worker.signals.result.connect(update_log)
+        worker.signals.finished.connect(loader.close)
+        self.pool.start(worker)
 
 
     def on_clean_done(self, results, loader):
@@ -291,37 +344,52 @@ class MainWindow(QtWidgets.QMainWindow):
     def setup_perf_tab(self):
         self.options = {}
         self.tab_perf = QtWidgets.QWidget()
-        self.tabs.addTab(self.tab_perf, "Performance")
-        opts = [("swappiness","vm.swappiness"),("hugepages","vm.nr_hugepages"),
-                ("governor","Gouverneur CPU"),("zram","ZRAM"),
-                ("iosched","Planificateur I/O"),("bluetooth","Service Bluetooth"),
-                ("cups","Service CUPS")]
+        self.tabs.addTab(self.tab_perf,"Performance")
+
+        # Options disponibles
+        opts = [
+            ("swappiness","vm.swappiness"),
+            ("hugepages","vm.nr_hugepages"),
+            ("governor","Gouverneur CPU"),
+            ("zram","ZRAM"),
+            ("iosched","Planificateur I/O"),
+            ("bluetooth","Service Bluetooth"),
+            ("cups","Service CUPS")
+        ]
+
         layout = QtWidgets.QVBoxLayout()
         opts_group = QtWidgets.QGroupBox("Options")
         opts_layout = QtWidgets.QGridLayout()
         opts_group.setLayout(opts_layout)
+
         for i,(k,lbl) in enumerate(opts):
-            cb = QtWidgets.QCheckBox(lbl); val = QtWidgets.QLabel("...")
-            opts_layout.addWidget(cb,i,0); opts_layout.addWidget(val,i,1)
+            cb = QtWidgets.QCheckBox(lbl)
+            val = QtWidgets.QLabel("...")
+            opts_layout.addWidget(cb,i,0)
+            opts_layout.addWidget(val,i,1)
             self.options[k] = (cb,val)
+
         layout.addWidget(opts_group)
 
-        # boutons
+        # Boutons
         btn_layout = QtWidgets.QHBoxLayout()
         self.btn_refresh = QtWidgets.QPushButton("Rafraîchir")
         self.btn_apply_sel = QtWidgets.QPushButton("Appliquer sélection")
         self.btn_revert_sel = QtWidgets.QPushButton("Revert sélection")
         self.btn_apply_all = QtWidgets.QPushButton("Appliquer tout")
         self.btn_revert_all = QtWidgets.QPushButton("Revert tout")
-        for b in [self.btn_refresh,self.btn_apply_sel,self.btn_revert_sel,self.btn_apply_all,self.btn_revert_all]: btn_layout.addWidget(b)
+
+        for b in [self.btn_refresh,self.btn_apply_sel,self.btn_revert_sel,self.btn_apply_all,self.btn_revert_all]:
+            btn_layout.addWidget(b)
         layout.addLayout(btn_layout)
 
-        # log
-        self.log_perf = QtWidgets.QPlainTextEdit(); self.log_perf.setReadOnly(True)
+        # Log
+        self.log_perf = QtWidgets.QPlainTextEdit()
+        self.log_perf.setReadOnly(True)
         layout.addWidget(self.log_perf)
         self.tab_perf.setLayout(layout)
 
-        # connections
+        # Connexion boutons
         self.btn_refresh.clicked.connect(lambda: self.confirmed_refresh_perf())
         self.btn_apply_sel.clicked.connect(lambda: self.confirmed_apply_perf(True, True))
         self.btn_revert_sel.clicked.connect(lambda: self.confirmed_apply_perf(False, True))
@@ -338,64 +406,96 @@ class MainWindow(QtWidgets.QMainWindow):
 
     # ------------------ refresh_perf thread-safe ------------------
     def refresh_perf(self):
+        def update_ui(data):
+            sw, hp, gov, zram, ios, bt, cups = data
+            self.options["swappiness"][1].setText(sw)
+            self.options["hugepages"][1].setText(hp)
+            self.options["governor"][1].setText(gov)
+            self.options["zram"][1].setText("activé" if zram else "désactivé")
+            self.options["iosched"][1].setText(",".join(f"{k}:{v}" for k,v in ios.items()))
+            self.options["bluetooth"][1].setText("activé" if bt else "désactivé")
+            self.options["cups"][1].setText("activé" if cups else "désactivé")
+            self.log_perf.appendPlainText("[✓] Statut rafraîchi")
+
         def worker_fn():
-            try:
-                return {
-                    "swappiness": get_sysctl_param("vm.swappiness"),
-                    "hugepages": get_sysctl_param("vm.nr_hugepages"),
-                    "governor": get_cpu_governor(),
-                    "zram": "activé" if zram_enabled() else "désactivé",
-                    "iosched": ",".join(f"{k}:{v}" for k,v in get_io_schedulers().items()),
-                    "bluetooth": "activé" if service_enabled("bluetooth") else "désactivé",
-                    "cups": "activé" if service_enabled("cups") else "désactivé"
-                }
-            except Exception as e:
-                return {"error": str(e)}
+            return (
+                get_sysctl_param("vm.swappiness"),
+                get_sysctl_param("vm.nr_hugepages"),
+                get_cpu_governor(),
+                zram_enabled(),
+                get_io_schedulers(),
+                service_enabled("bluetooth"),
+                service_enabled("cups")
+            )
 
-        def update_ui(res):
-            if "error" in res:
-                self.log_safe(self.log_perf, f"[Erreur] {res['error']}")
-                return
-            for k, v in res.items():
-                if k in self.options:
-                    self.options[k][1].setText(v)
-            self.log_safe(self.log_perf, "-"*40)
-            self.log_safe(self.log_perf, "[✓] Statut rafraîchi")
+        loader = QtWidgets.QProgressDialog("Rafraîchissement en cours...", None, 0, 0, self)
+        loader.setWindowModality(QtCore.Qt.ApplicationModal)
+        loader.setCancelButton(None)
+        loader.show()
 
-        worker = Worker(worker_fn)
-        worker.signals.result.connect(update_ui)
-        self.pool.start(worker)
+        w = Worker(worker_fn)
+        w.signals.result.connect(update_ui)
+        w.signals.finished.connect(loader.close)
+        self.pool.start(w)
+
 
     # ------------------ apply_perf thread-safe ------------------
     def apply_perf(self, apply, selected):
         keys = self.options.keys() if not selected else [k for k,(cb,_) in self.options.items() if cb.isChecked()]
         if not keys:
-            self.log_safe(self.log_perf, "Aucune option sélectionnée")
+            self.log_perf.appendPlainText("Aucune option sélectionnée")
             return
 
-        self.log_safe(self.log_perf, "-"*40)
-        self.log_safe(self.log_perf, f"{'Application' if apply else 'Restauration'} : {', '.join(keys)}")
+        def worker_fn():
+            res = []
+            for k in keys:
+                try:
+                    if k == "swappiness":
+                        val = "10" if apply else "60"
+                        set_sysctl_param("vm.swappiness", val)
+                        res.append((k, f"swappiness -> {val}"))
+                    elif k == "hugepages":
+                        val = "128" if apply else "0"
+                        set_sysctl_param("vm.nr_hugepages", val)
+                        res.append((k, f"hugepages -> {val}"))
+                    elif k == "governor":
+                        val = "performance" if apply else "powersave"
+                        set_cpu_governor(val)
+                        res.append((k, f"governor CPU -> {val}"))
+                    elif k == "zram":
+                        if apply: enable_zram()
+                        else: disable_zram()
+                        res.append((k, f"ZRAM -> {'activé' if apply else 'désactivé'}"))
+                    elif k == "iosched":
+                        val = "noop" if apply else "cfq"
+                        set_io_scheduler(val)
+                        res.append((k, f"I/O scheduler -> {val}"))
+                    elif k == "bluetooth":
+                        set_service("bluetooth", enable=not apply)
+                        res.append((k, f"Bluetooth -> {'activé' if not apply else 'désactivé'}"))
+                    elif k == "cups":
+                        set_service("cups", enable=not apply)
+                        res.append((k, f"CUPS -> {'activé' if not apply else 'désactivé'}"))
+                except Exception as e:
+                    res.append((k, f"[Erreur] {e}"))
+            return res
 
-        for k in keys:
-            try:
-                if k == "governor":
-                    set_cpu_governor("performance" if apply else "powersave")
-                elif k == "swappiness":
-                    set_sysctl_param("vm.swappiness","10" if apply else "60")
-                elif k == "hugepages":
-                    set_sysctl_param("vm.nr_hugepages","128" if apply else "0")
-                elif k == "zram":
-                    enable_zram() if apply else disable_zram()
-                elif k == "bluetooth":
-                    set_service("bluetooth", enable=not apply)
-                elif k == "cups":
-                    set_service("cups", enable=not apply)
-                self.log_safe(self.log_perf, f"{k} -> {'appliqué' if apply else 'restauré'}")
-            except Exception as e:
-                self.log_safe(self.log_perf, f"{k} erreur : {e}")
+        def update_ui(res):
+            if self.log_perf.toPlainText().strip():
+                self.log_perf.appendPlainText("-"*40)
+            for _, msg in res:
+                self.log_perf.appendPlainText(msg)
+            self.refresh_perf()
 
-        # refresh UI après application
-        QtCore.QTimer.singleShot(200, self.refresh_perf)
+        loader = QtWidgets.QProgressDialog(f"{'Application' if apply else 'Restauration'} en cours...", None, 0, 0, self)
+        loader.setWindowModality(QtCore.Qt.ApplicationModal)
+        loader.setCancelButton(None)
+        loader.show()
+
+        w = Worker(worker_fn)
+        w.signals.result.connect(update_ui)
+        w.signals.finished.connect(loader.close)
+        self.pool.start(w)
 
     def setup_services_tab(self):
         self.tab_services = QtWidgets.QWidget()
